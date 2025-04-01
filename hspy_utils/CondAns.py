@@ -12,6 +12,7 @@ import seaborn as sns
 from scipy.signal import find_peaks, peak_widths
 import os
 import pandas as pd
+from skimage.exposure import match_histograms
 
 class CondAns:
     def __init__(self, data_dict: dict, ref, load_mapping=False):
@@ -24,18 +25,20 @@ class CondAns:
             with open("data_coordinates.pkl", "rb") as file:
                 self.data_coordinates = pickle.load(file)
 
-    def map_all_pixels(self, window_size, max_disp, threshold, ref):
+    def map_all_pixels(self, window_size, max_disp, ref):
         image_ref = self.data_dict[ref].get_live_scan()
         mapping_save = dict()
         mapping = ''
+        for key, value in self.data_dict.items():
+            value.live_scan = match_histograms(value.live_scan, image_ref)
         for key in self.data_dict.keys():
             if key == ref:
                 mapping_save['ref'] = key
                 continue
             mapping = CondAns.map_pixels(image_ref, self.data_dict[key].get_live_scan(), window_size=window_size,
-                                         max_disp=max_disp, threshold=threshold)
+                                         search_radius=max_disp)
             mapping_save[key] = mapping
-        # print(mapping_save)
+        print(mapping_save)
         mapping_save['ref'] = list(mapping.keys())
         with open("data_coordinates.pkl", "wb") as file:
             pickle.dump(mapping_save, file)
@@ -571,52 +574,77 @@ class CondAns:
         return ssim_value, is_similar, patch1, patch2
 
     @staticmethod
-    def map_pixels(image1, image2, window_size=7, max_disp=5, threshold=0.5):
+    def map_pixels(img1, img2, window_size=11, search_radius=15):
         """
-        Maps each pixel in image1 to its best matching pixel in image2 based on SSIM.
+        Find pixel correspondences between two images using local SSIM comparison
 
-        Parameters:
-        - image1, image2: Input images as NumPy arrays.
-        - window_size: Size of the square window around the pixel to compute SSIM.
-        - max_disp: Maximum displacement to search in image2 around each pixel in image1.
-        - threshold: SSIM threshold to consider a valid match.
+        Args:
+            img1 (numpy.ndarray): First image (2D array)
+            img2 (numpy.ndarray): Second image (2D array)
+            window_size (int): Odd number size of the comparison window
+            search_radius (int): Search radius in pixels around original position
 
         Returns:
-        - mapping: A dictionary with keys as coordinates in image1 and values as the best matching coordinates in image2.
+            correspondence_map (numpy.ndarray): Array of shape (H, W, 2) containing
+            corresponding [x,y] coordinates in img2 for each pixel in img1
         """
-        height, width = image1.shape[:2]
-        half_window = window_size // 2
-        margin = max(half_window, max_disp)
-        mapping = {}
 
-        for y1 in range(half_window, height - half_window):
-            for x1 in range(half_window, width - half_window):
-                best_ssim = -1
-                best_coord2 = None
-                coord1 = (y1, x1)
+        assert img1.ndim == 2 and img2.ndim == 2, "Images must be 2D arrays"
+        assert img1.shape == img2.shape, "Images must have the same dimensions"
+        assert window_size % 2 == 1, "Window size must be odd"
 
-                for dy in range(-max_disp, max_disp + 1):
-                    for dx in range(-max_disp, max_disp + 1):
-                        y2 = y1 + dy
-                        x2 = x1 + dx
+        global_min = min(img1.min(), img2.min())
+        global_max = max(img1.max(), img2.max())
+        data_range = global_max - global_min
+        result_dict = dict()
 
-                        # if half_window <= y2 < height - half_window and half_window <= x2 < width - half_window:
-                        if x2 >= 0 or y2 >= 0:
-                            coord2 = (y2, x2)
-                            ssim_value, is_similar, _, _ = CondAns.are_pixels_similar(
-                                image1, image2, coord1, coord2, window_size, threshold
-                            )
+        pad = window_size // 2
+        height, width = img1.shape
 
-                            if ssim_value > best_ssim:
-                                best_ssim = ssim_value
-                                best_coord2 = coord2
+        img1_padded = np.pad(img1, pad, mode='reflect')
+        img2_padded = np.pad(img2, pad, mode='reflect')
 
-                if best_ssim >= threshold:
-                    mapping[coord1] = best_coord2
-                else:
-                    mapping[coord1] = None
+        correspondence_map = np.zeros((height, width, 2), dtype=np.int32)
 
-        return mapping
+        offsets = [(di, dj) for di in range(-search_radius, search_radius + 1)
+                   for dj in range(-search_radius, search_radius + 1)]
+
+        for i in range(height):
+            for j in range(width):
+                pi, pj = i + pad, j + pad
+
+                window1 = img1_padded[pi - pad:pi + pad + 1, pj - pad:pj + pad + 1]
+
+                best_score = -np.inf
+                best_pos = (i, j)
+
+                min_i = max(pad, pi - search_radius)
+                max_i = min(img2_padded.shape[0] - pad, pi + search_radius + 1)
+                min_j = max(pad, pj - search_radius)
+                max_j = min(img2_padded.shape[1] - pad, pj + search_radius + 1)
+
+                for x in range(min_i, max_i):
+                    for y in range(min_j, max_j):
+                        window2 = img2_padded[x - pad:x + pad + 1, y - pad:y + pad + 1]
+
+                        score = ssim(window1, window2,
+                                     data_range=data_range,
+                                     gaussian_weights=True,
+                                     win_size=window_size,
+                                     use_sample_covariance=False)
+
+                        if score > best_score:
+                            best_score = score
+                            best_pos = (x - pad, y - pad)
+
+                correspondence_map[i, j] = best_pos
+
+        for i in range(height):
+            for j in range(width):
+                result_dict[(i, j)] = correspondence_map[i][j]
+
+        return result_dict
+
 
     @staticmethod
     def fit_lorentzian_spectrum(x, y, num_peaks=1, model_func=VoigtModel):

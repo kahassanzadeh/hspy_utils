@@ -21,7 +21,7 @@ The requirements are all represented in `requirement.txt` file
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/your_username/hspy_utils.git
+   git clone https://github.com/kahassanzadeh/hspy_utils.git
    cd hspy_utils
    
 2. **Installing in Editable Mode:**
