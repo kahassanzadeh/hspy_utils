@@ -1,5 +1,5 @@
 # hspy_utils
-![hspy_utils Logo](images/hspy_utils.png)
+![hspy_utils Logo](images/hspy_utils.jpg)
 
 
 **hspy_utils** is a Python library designed to assist with spectral analysis and curve fitting. It includes two modules:
