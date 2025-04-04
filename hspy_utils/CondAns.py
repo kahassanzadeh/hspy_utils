@@ -66,23 +66,23 @@ class CondAns:
             coord_y = []
             for i in self.data_coordinates.keys():
                 if i == 'ref':
-                    coord_x.append(key_coord[0])
-                    coord_y.append(key_coord[1])
+                    coord_x.append(key_coord[1])
+                    coord_y.append(key_coord[0])
                     CondAns.__plot_image_with_rect(image_axes[self.ref], self.data_dict[self.ref].get_live_scan(),
-                                                   (coord_x[-1], coord_y[-1]), self.ref)
+                                                   key_coord, self.ref)
                 else:
                     temp_coord = self.data_coordinates[i].get(key_coord)
                     if temp_coord is None:
                         temp_coord = (0, 0)
-                    coord_x.append(temp_coord[0])
-                    coord_y.append(temp_coord[1])
+                    coord_x.append(temp_coord[1])
+                    coord_y.append(temp_coord[0])
                     CondAns.__plot_image_with_rect(image_axes[i], self.data_dict[i].get_live_scan(),
-                                                   (coord_x[-1], coord_y[-1]), i)
-            for idx, (temp, color, x, y) in enumerate(zip(list(self.data_dict.keys()), colors, coord_y, coord_x)):
+                                                   temp_coord, i)
+            for idx, (temp, color, x, y) in enumerate(zip(list(self.data_dict.keys()), colors, coord_x, coord_y)):
                 if x == 0 and y == 0:
                     continue
                 wavelengths = self.data_dict[temp].get_wavelengths()[::-1]
-                intensity = self.data_dict[temp].get_numpy_spectra()[x][y][::-1]
+                intensity = self.data_dict[temp].get_numpy_spectra()[y][x][::-1]
                 ax_main.plot(wavelengths, intensity, color=color, linewidth=2, label=f'{temp} nA')
 
             ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
@@ -113,7 +113,7 @@ class CondAns:
             if save:
                 folder = f'./{filename}'
                 os.makedirs(folder, exist_ok=True)
-                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}.png', dpi=400)
+                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}.png', dpi=300)
                 plt.show()
             plt.close()
 
@@ -128,6 +128,8 @@ class CondAns:
         :param peaks: The number of peaks will be defined automatically; however, you can define estimations about the number of peaks that you may have.
         :return:
         '''
+
+        #TODO: Correcting Coordinates
         list_of_exp = list(self.data_dict.keys())
         for key_coord in self.data_coordinates['ref']:
             colors = sns.color_palette("inferno", len(list_of_exp))
@@ -267,6 +269,8 @@ class CondAns:
 
     def single_exp_run_plot(self, exp_key, figsize=(20, 10), save=False, filename=None, fit_func=VoigtModel,
                             peaks='Automatic'):
+        #TODO: Correcting Coordinates
+
         exp = self.data_dict.get(exp_key)
         mapping = dict()
         for i in range(exp.get_live_scan().shape[0]):
@@ -388,6 +392,8 @@ class CondAns:
 
     def single_exp_run_fitting(self, exp_key, save=False, filename=None, fit_func=VoigtModel,
                                peaks='Automatic'):
+        #TODO: Correcting Coordinates
+
         exp = self.data_dict.get(exp_key)
         params_data = []
         mapping = dict()
@@ -641,7 +647,7 @@ class CondAns:
 
         for i in range(height):
             for j in range(width):
-                result_dict[(i, j)] = correspondence_map[i][j]
+                result_dict[(i, j)] = tuple(correspondence_map[i][j])
 
         return result_dict
 
