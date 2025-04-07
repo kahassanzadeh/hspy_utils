@@ -14,13 +14,18 @@ import os
 import pandas as pd
 from skimage.exposure import match_histograms
 
+
 class CondAns:
     def __init__(self, data_dict: dict, ref, load_mapping=False):
+        self.best_r2 = None
+        self.best_result = None
         self.best_model = None
         self.params_fit = None
         self.best_fit = None
         self.data_dict = data_dict
         self.ref = ref
+        self.list_of_exp = list(self.data_dict.keys())
+
         if load_mapping:
             with open("data_coordinates.pkl", "rb") as file:
                 self.data_coordinates = pickle.load(file)
@@ -44,40 +49,28 @@ class CondAns:
             pickle.dump(mapping_save, file)
             self.data_coordinates = mapping_save
 
-    def plot_all_pixels(self, figsize=(20, 10), save=False, filename=None):
-        list_of_exp = list(self.data_dict.keys())
+    def plot_all_pixels(self, figsize=(20, 10), save=False, filename=None, x_pixel=0, y_pixel=0, show_plots=False):
+        '''
 
+        :param show_plots: 
+        :param figsize:
+        :param save:
+        :param filename:
+        :param x_pixel:
+        :param y_pixel:
+        '''
+
+        shape_image = self.data_dict[self.ref].get_live_scan().shape
         for key_coord in self.data_coordinates['ref']:
-            colors = sns.color_palette("inferno", len(list_of_exp))
-            n_images = len(list_of_exp)
-            fig = plt.figure(figsize=figsize)
-            gs = GridSpec(6, 7, figure=fig, wspace=0.1, hspace=0.2)
-            ax_main = fig.add_subplot(gs[:, 0:4])
-            image_axes = dict()
-            n_cols = 3
+            key_coord = (key_coord[0] + y_pixel, key_coord[1] + x_pixel)
+            if key_coord[1] > shape_image[1] or key_coord[0] > shape_image[0]:
+                continue
+            print(key_coord[0], key_coord[1])
 
-            for i, (key, value) in enumerate(self.data_dict.items(), start=0):
-                row = (i // n_cols) * 2
-                col = 4 + (i % n_cols)
-                ax_im = fig.add_subplot(gs[row:row + 2, col])
-                image_axes[key] = ax_im
+            ax_main, image_axes, colors = self.__setup_plotting(figsize,
+                                                                self.data_dict[self.ref].get_wavelengths()[::-1])
+            coord_x, coord_y = self.__setup_coordinations(key_coord, image_axes)
 
-            coord_x = []
-            coord_y = []
-            for i in self.data_coordinates.keys():
-                if i == 'ref':
-                    coord_x.append(key_coord[1])
-                    coord_y.append(key_coord[0])
-                    CondAns.__plot_image_with_rect(image_axes[self.ref], self.data_dict[self.ref].get_live_scan(),
-                                                   key_coord, self.ref)
-                else:
-                    temp_coord = self.data_coordinates[i].get(key_coord)
-                    if temp_coord is None:
-                        temp_coord = (0, 0)
-                    coord_x.append(temp_coord[1])
-                    coord_y.append(temp_coord[0])
-                    CondAns.__plot_image_with_rect(image_axes[i], self.data_dict[i].get_live_scan(),
-                                                   temp_coord, i)
             for idx, (temp, color, x, y) in enumerate(zip(list(self.data_dict.keys()), colors, coord_x, coord_y)):
                 if x == 0 and y == 0:
                     continue
@@ -85,42 +78,27 @@ class CondAns:
                 intensity = self.data_dict[temp].get_numpy_spectra()[y][x][::-1]
                 ax_main.plot(wavelengths, intensity, color=color, linewidth=2, label=f'{temp} nA')
 
-            ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
-            ax_main.set_ylabel('Intensity (a.u.)', fontsize=18, labelpad=15)
-
-            ax_main.tick_params(axis='both', which='major', labelsize=14, length=6, width=1.5)
-            ax_main.tick_params(axis='both', which='minor', length=4, width=1)
-
-            # Add top x-axis for energy scale
-            secax = ax_main.secondary_xaxis('top')
-            secax.set_xlabel('Energy (eV)', fontsize=18, labelpad=15)
-            secax.tick_params(axis='x', labelsize=14, length=6, width=1.5)
-
-            wavelength_ticks = np.linspace(min(wavelengths), max(wavelengths), num=6)
-            energy_ticks = np.linspace(wavelengths[0], wavelengths[-1], num=5)
-            secax.set_xticks(energy_ticks)
-            secax.set_xticklabels([f'{1239.84193 / wl:.2f}' for wl in energy_ticks])
-
-            ax_main.grid(True)
-            ax_main.grid(True, which='both', color='black', linestyle='--', linewidth=0.3)
-            for spine in ax_main.spines.values():
-                spine.set_edgecolor('black')
-                spine.set_linewidth(1.5)
-            ax_main.axvspan(950, 1000, color='green', alpha=0.15, label="950-1000 nm")
-            ax_main.axvspan(870, 940, color='blue', alpha=0.15, label="870-940 nm")
-
-            ax_main.legend()
             if save:
                 folder = f'./{filename}'
                 os.makedirs(folder, exist_ok=True)
                 plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}.png', dpi=300)
+
+            if show_plots:
                 plt.show()
-            plt.close()
+                plt.close()
 
     def plot_all_pixels_with_fitting(self, figsize=(20, 10), save=False, filename=None, fit_func=VoigtModel,
-                                     peaks='Automatic'):
+                                     peaks='Automatic', max_peaks=3, x_pixel=0, y_pixel=0, height=100, prominence=1,
+                                     distance=5, show_plots=False):
         '''
 
+        :param show_plots:
+        :param x_pixel:
+        :param y_pixel:
+        :param prominence:
+        :param height:
+        :param distance:
+        :param max_peaks:
         :param figsize:
         :param save:
         :param filename:
@@ -129,371 +107,294 @@ class CondAns:
         :return:
         '''
 
-        #TODO: Correcting Coordinates
-        list_of_exp = list(self.data_dict.keys())
+        shape_image = self.data_dict[self.ref].get_live_scan().shape
         for key_coord in self.data_coordinates['ref']:
-            colors = sns.color_palette("inferno", len(list_of_exp))
-            n_images = len(list_of_exp)
-            fig = plt.figure(figsize=figsize)
-            gs = GridSpec(6, 7, figure=fig, wspace=0.1, hspace=0.2)
-            ax_main = fig.add_subplot(gs[:, 0:4])
-            image_axes = dict()
-            n_cols = 3
+            key_coord = (key_coord[0] + y_pixel, key_coord[1] + x_pixel)
+            if key_coord[1] > shape_image[1] or key_coord[0] > shape_image[0]:
+                continue
 
-            for i, (key, value) in enumerate(self.data_dict.items(), start=0):
-                row = (i // n_cols) * 2
-                col = 4 + (i % n_cols)
-                ax_im = fig.add_subplot(gs[row:row + 2, col])
-                image_axes[key] = ax_im
+            print(key_coord[0], key_coord[1])
 
-            coord_x = []
-            coord_y = []
-            for i in self.data_coordinates.keys():
-                if i == 'ref':
-                    coord_x.append(key_coord[0])
-                    coord_y.append(key_coord[1])
-                    CondAns.__plot_image_with_rect(image_axes[self.ref], self.data_dict[self.ref].get_live_scan(),
-                                                   (coord_x[-1], coord_y[-1]), self.ref)
-                else:
-                    temp_coord = self.data_coordinates[i].get(key_coord)
-                    if temp_coord is None:
-                        temp_coord = (0, 0)
-                    coord_x.append(temp_coord[0])
-                    coord_y.append(temp_coord[1])
-                    CondAns.__plot_image_with_rect(image_axes[i], self.data_dict[i].get_live_scan(),
-                                                   (coord_x[-1], coord_y[-1]), i)
-            for idx, (temp, color, x, y) in enumerate(zip(list(self.data_dict.keys()), colors, coord_y, coord_x)):
+            ax_main, image_axes, colors = self.__setup_plotting(figsize,
+                                                                self.data_dict[self.ref].get_wavelengths()[::-1])
+            coord_x, coord_y = self.__setup_coordinations(key_coord, image_axes)
+
+            for idx, (temp, color, x, y) in enumerate(zip(list(self.data_dict.keys()), colors, coord_x, coord_y)):
                 if x == 0 and y == 0:
                     continue
                 wavelengths = self.data_dict[temp].get_wavelengths()[::-1]
-                intensity = self.data_dict[temp].get_numpy_spectra()[x][y][::-1]
-                # ax_main.plot(wavelengths, intensity, color=color, linewidth=2, label=f'{temp} nA')
+                intensity = self.data_dict[temp].get_numpy_spectra()[y][x][::-1]
+                ax_main.plot(wavelengths, intensity, color=color, linewidth=2, label=f'{temp} nA')
                 if peaks == 'Automatic':
-                    peaks_indices, properties = find_peaks(intensity, height=80, prominence=5, distance=20)
-                    peak_positions = wavelengths[peaks_indices]
-                    peak_heights = intensity[peaks_indices]
+                    self.__peak_fitting_auto(intensity, wavelengths, height, prominence, distance, max_peaks, fit_func)
+                    ax_main.plot(wavelengths, self.best_result.best_fit, '--', color=color, linewidth=2,
+                                 label=f'R²={self.best_r2:.4f}')
+                if peaks == 'Manual':
+                    pass
 
-                    sorted_idx = np.argsort(peak_heights)[::-1]
-                    peak_positions = peak_positions[sorted_idx]
-                    peak_heights = peak_heights[sorted_idx]
-
-                    r2_list = []
-                    params_list = []
-                    models = []
-                    result = ''
-
-                    model = ConstantModel(prefix='bkg_')
-                    params = model.make_params(bkg_c=0)
-                    for m, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
-                        prefix = f'g{m}_'
-                        gauss = fit_func(prefix=prefix)
-                        model += gauss
-                        params.update(gauss.make_params())
-                        params[f'{prefix}amplitude'].set(value=height, min=0)
-                        params[f'{prefix}center'].set(value=pos)
-                        params[f'{prefix}sigma'].set(value=1, min=0.1)
-
-                        result = model.fit(intensity, params, x=wavelengths)
-
-                        ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                        ss_residual = np.sum(result.residual ** 2)
-                        r_squared = 1 - (ss_residual / ss_total)
-                        r2_list.append(r_squared)
-                        params_list.append(result.params)
-                        models.append(model)
-                        print(f"Using {m + 1} peak(s): R² = {r_squared:.4f}")
-
-                        if len(peak_positions) == 1:
-                            self.best_fit = m
-                            self.params_fit = params_list[-1]
-                            self.best_model = models[-1]
-                            break
-
-                        if len(r2_list) == len(peak_positions):
-                            if r2_list[-1] - r2_list[-2] < 0.01:
-                                self.best_fit = m
-                                self.params_fit = params_list[-2]
-                                self.best_model = models[-2]
-                            else:
-                                self.best_fit = m + 1
-                                self.params_fit = params_list[-1]
-                                self.best_model = models[-1]
-
-                        if len(r2_list) > 1 and r2_list[-1] - r2_list[-2] < 0.01 and r2_list[-2] > 0.9:
-                            self.best_fit = m
-                            self.params_fit = params_list[-2]
-                            self.best_model = models[-2]
-                            break
-
-                    try:
-                        result = self.best_model.fit(intensity, params, x=wavelengths)
-                        ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                        ss_residual = np.sum(result.residual ** 2)
-                        r_squared = 1 - (ss_residual / ss_total)
-                        ax_main.plot(wavelengths, result.best_fit, color=color, linewidth=2,
-                                     label=f'{temp} nA - R²={r_squared:.4f}')
-                    except Exception as e:
-                        print("An error occurred during fitting:")
-                        traceback.print_exc()
-
-            ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
-            ax_main.set_ylabel('Intensity (a.u.)', fontsize=18, labelpad=15)
-
-            ax_main.tick_params(axis='both', which='major', labelsize=14, length=6, width=1.5)
-            ax_main.tick_params(axis='both', which='minor', length=4, width=1)
-
-            secax = ax_main.secondary_xaxis('top')
-            secax.set_xlabel('Energy (eV)', fontsize=18, labelpad=15)
-            secax.tick_params(axis='x', labelsize=14, length=6, width=1.5)
-
-            wavelength_ticks = np.linspace(min(wavelengths), max(wavelengths), num=6)
-            energy_ticks = np.linspace(wavelengths[0], wavelengths[-1], num=5)
-            secax.set_xticks(energy_ticks)
-            secax.set_xticklabels([f'{1239.84193 / wl:.2f}' for wl in energy_ticks])
-
-            ax_main.grid(True)
-            ax_main.grid(True, which='both', color='black', linestyle='--', linewidth=0.3)
-            for spine in ax_main.spines.values():
-                spine.set_edgecolor('black')
-                spine.set_linewidth(1.5)
-            ax_main.axvspan(950, 1000, color='green', alpha=0.15, label="950-1000 nm")
-            ax_main.axvspan(870, 940, color='blue', alpha=0.15, label="870-940 nm")
-
-            ax_main.legend()
             if save:
                 folder = f'./{filename}'
                 os.makedirs(folder, exist_ok=True)
-                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}_fitted.png', dpi=400)
+                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}_fitted.png', dpi=300)
+
+            if show_plots:
                 plt.show()
-            plt.close()
+                plt.close()
 
-    def single_exp_run_plot(self, exp_key, figsize=(20, 10), save=False, filename=None, fit_func=VoigtModel,
-                            peaks='Automatic'):
-        #TODO: Correcting Coordinates
+    def single_exp_run_plot(self, exp_key, figsize=(20, 10), save=False, show_plots=False, filename=None, x_pixel=0,
+                            y_pixel=0):
 
-        exp = self.data_dict.get(exp_key)
-        mapping = dict()
-        for i in range(exp.get_live_scan().shape[0]):
-            for j in range(exp.get_live_scan().shape[1]):
-                mapping[(i, j)] = (i, j)
+        shape_image = self.data_dict[self.ref].get_live_scan().shape
 
-        for key_coord in mapping:
-            fig = plt.figure(figsize=figsize)
-            gs = GridSpec(6, 7, figure=fig, wspace=0.1, hspace=0.2)
-            ax_main = fig.add_subplot(gs[:, :])
+        for key_coord in self.data_coordinates[exp_key]:
+            key_coord = (key_coord[0] + y_pixel, key_coord[1] + x_pixel)
+            if key_coord[1] > shape_image[1] or key_coord[0] > shape_image[0]:
+                continue
+            print(key_coord[0], key_coord[1])
+
             x = key_coord[1]
             y = key_coord[0]
 
             wavelengths = self.data_dict[exp_key].get_wavelengths()[::-1]
-            intensity = self.data_dict[exp_key].get_numpy_spectra()[x][y][::-1]
+            intensity = self.data_dict[exp_key].get_numpy_spectra()[y][x][::-1]
+
+            ax_main, ax_image = self.__setup_plotting_single_image(figsize, wavelengths)
             ax_main.plot(wavelengths, intensity, color='red', linewidth=2)
-            if peaks == 'Automatic':
-                peaks_indices, properties = find_peaks(intensity, height=80, prominence=5, distance=20)
-                peak_positions = wavelengths[peaks_indices]
-                peak_heights = intensity[peaks_indices]
+            CondAns.__plot_image_with_rect(ax_image, self.data_dict[exp_key].get_live_scan(),
+                                           (x, y), exp_key)
 
-                sorted_idx = np.argsort(peak_heights)[::-1]
-                peak_positions = peak_positions[sorted_idx]
-                peak_heights = peak_heights[sorted_idx]
-
-                r2_list = []
-                params_list = []
-                models = []
-                result = ''
-
-                model = ConstantModel(prefix='bkg_')
-                params = model.make_params(bkg_c=0)
-                for m, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
-                    prefix = f'g{m}_'
-                    gauss = fit_func(prefix=prefix)
-                    model += gauss
-                    params.update(gauss.make_params())
-                    params[f'{prefix}amplitude'].set(value=height, min=0)
-                    params[f'{prefix}center'].set(value=pos)
-                    params[f'{prefix}sigma'].set(value=1, min=0.1)
-
-                    result = model.fit(intensity, params, x=wavelengths)
-
-                    ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                    ss_residual = np.sum(result.residual ** 2)
-                    r_squared = 1 - (ss_residual / ss_total)
-                    r2_list.append(r_squared)
-                    params_list.append(result.params)
-                    models.append(model)
-                    print(f"Using {m + 1} peak(s): R² = {r_squared:.4f}")
-
-                    if len(peak_positions) == 1:
-                        self.best_fit = m
-                        self.params_fit = params_list[-1]
-                        self.best_model = models[-1]
-                        break
-
-                    if len(r2_list) == len(peak_positions):
-                        if r2_list[-1] - r2_list[-2] < 0.01:
-                            self.best_fit = m
-                            self.params_fit = params_list[-2]
-                            self.best_model = models[-2]
-                        else:
-                            self.best_fit = m + 1
-                            self.params_fit = params_list[-1]
-                            self.best_model = models[-1]
-
-                    if len(r2_list) > 1 and r2_list[-1] - r2_list[-2] < 0.01 and r2_list[-2] > 0.9:
-                        self.best_fit = m
-                        self.params_fit = params_list[-2]
-                        self.best_model = models[-2]
-                        break
-
-                try:
-                    result = self.best_model.fit(intensity, params, x=wavelengths)
-
-                    ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                    ss_residual = np.sum(result.residual ** 2)
-                    r_squared = 1 - (ss_residual / ss_total)
-
-                    ax_main.plot(wavelengths, result.best_fit, color='blue', linewidth=2,
-                                 label=f'R²={r_squared:.4f}')
-                except Exception as e:
-                    print("An error occurred during fitting:")
-                    traceback.print_exc()
-
-            ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
-            ax_main.set_ylabel('Intensity (a.u.)', fontsize=18, labelpad=15)
-
-            ax_main.tick_params(axis='both', which='major', labelsize=14, length=6, width=1.5)
-            ax_main.tick_params(axis='both', which='minor', length=4, width=1)
-
-            secax = ax_main.secondary_xaxis('top')
-            secax.set_xlabel('Energy (eV)', fontsize=18, labelpad=15)
-            secax.tick_params(axis='x', labelsize=14, length=6, width=1.5)
-
-            wavelength_ticks = np.linspace(min(wavelengths), max(wavelengths), num=6)
-            energy_ticks = np.linspace(wavelengths[0], wavelengths[-1], num=5)
-            secax.set_xticks(energy_ticks)
-            secax.set_xticklabels([f'{1239.84193 / wl:.2f}' for wl in energy_ticks])
-
-            ax_main.grid(True)
-            ax_main.grid(True, which='both', color='black', linestyle='--', linewidth=0.3)
-            for spine in ax_main.spines.values():
-                spine.set_edgecolor('black')
-                spine.set_linewidth(1.5)
-            ax_main.axvspan(950, 1000, color='green', alpha=0.15, label="950-1000 nm")
-            ax_main.axvspan(870, 940, color='blue', alpha=0.15, label="870-940 nm")
-
-            ax_main.legend()
             if save:
                 folder = f'./{filename}'
                 os.makedirs(folder, exist_ok=True)
-                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}_fitted.png', dpi=400)
+                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}_fitted.png', dpi=300)
+
+            if show_plots:
                 plt.show()
+                plt.close()
 
-            plt.close()
-        pass
+    def single_exp_run_fitting(self, exp_key, figsize=(20, 10), save_excel=False, filename=None, fit_func=VoigtModel,
+                            peaks='Automatic', max_peaks=3, x_pixel=0, y_pixel=0, height=100, prominence=1,
+                            distance=5, save_plots=False):
 
-    def single_exp_run_fitting(self, exp_key, save=False, filename=None, fit_func=VoigtModel,
-                               peaks='Automatic'):
-        #TODO: Correcting Coordinates
-
-        exp = self.data_dict.get(exp_key)
+        shape_image = self.data_dict[self.ref].get_live_scan().shape
         params_data = []
-        mapping = dict()
-        for i in range(exp.get_live_scan().shape[0]):
-            for j in range(exp.get_live_scan().shape[1]):
-                mapping[(i, j)] = (i, j)
 
-        for key_coord in mapping:
+        for key_coord in self.data_coordinates[exp_key]:
+            key_coord = (key_coord[0] + y_pixel, key_coord[1] + x_pixel)
+            if key_coord[1] > shape_image[1] or key_coord[0] > shape_image[0]:
+                continue
+            print(key_coord[0], key_coord[1])
+
             x = key_coord[1]
             y = key_coord[0]
-            print(f'processing {x}_{y}')
 
             wavelengths = self.data_dict[exp_key].get_wavelengths()[::-1]
-            intensity = self.data_dict[exp_key].get_numpy_spectra()[x][y][::-1]
+            intensity = self.data_dict[exp_key].get_numpy_spectra()[y][x][::-1]
+
+            ax_main, ax_image = self.__setup_plotting_single_image(figsize, wavelengths)
+            ax_main.plot(wavelengths, intensity, color='red', linewidth=2)
+            CondAns.__plot_image_with_rect(ax_image, self.data_dict[exp_key].get_live_scan(),
+                                           (x, y), exp_key)
+
             if peaks == 'Automatic':
-                peaks_indices, properties = find_peaks(intensity, height=80, prominence=5, distance=20)
-                peak_positions = wavelengths[peaks_indices]
-                peak_heights = intensity[peaks_indices]
-
-                sorted_idx = np.argsort(peak_heights)[::-1]
-                peak_positions = peak_positions[sorted_idx]
-                peak_heights = peak_heights[sorted_idx]
-
-                r2_list = []
-                params_list = []
-                models = []
-                result = ''
-
-                model = ConstantModel(prefix='bkg_')
-                params = model.make_params(bkg_c=0)
-                for m, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
-                    prefix = f'g{m}_'
-                    gauss = fit_func(prefix=prefix)
-                    model += gauss
-                    params.update(gauss.make_params())
-                    params[f'{prefix}amplitude'].set(value=height, min=0)
-                    params[f'{prefix}center'].set(value=pos)
-                    params[f'{prefix}sigma'].set(value=1, min=0.1)
-
-                    result = model.fit(intensity, params, x=wavelengths)
-
-                    ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                    ss_residual = np.sum(result.residual ** 2)
-                    r_squared = 1 - (ss_residual / ss_total)
-                    r2_list.append(r_squared)
-                    params_list.append(result.params)
-                    models.append(model)
-                    print(f"Using {m + 1} peak(s): R² = {r_squared:.4f}")
-
-                    if len(peak_positions) == 1:
-                        self.best_fit = m
-                        self.params_fit = params_list[-1]
-                        self.best_model = models[-1]
-                        break
-
-                    if len(r2_list) == len(peak_positions):
-                        if r2_list[-1] - r2_list[-2] < 0.01:
-                            self.best_fit = m
-                            self.params_fit = params_list[-2]
-                            self.best_model = models[-2]
-                        else:
-                            self.best_fit = m + 1
-                            self.params_fit = params_list[-1]
-                            self.best_model = models[-1]
-
-                    if len(r2_list) > 1 and r2_list[-1] - r2_list[-2] < 0.01 and r2_list[-2] > 0.9:
-                        self.best_fit = m
-                        self.params_fit = params_list[-2]
-                        self.best_model = models[-2]
-                        break
-
+                self.__peak_fitting_auto(intensity, wavelengths, height, prominence, distance, max_peaks, fit_func)
+                ax_main.plot(wavelengths, self.best_result.best_fit, '--', color=color, linewidth=2,
+                             label=f'R²={self.best_r2:.4f}')
                 try:
-                    result = self.best_model.fit(intensity, params, x=wavelengths)
-                    ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
-                    ss_residual = np.sum(result.residual ** 2)
-                    r_squared = 1 - (ss_residual / ss_total)
                     params_data.append({
                         "Key": (x, y),
-                        "R^2": r_squared
+                        "R^2": self.best_r2
                     })
-                    for param_name, param in result.params.items():
+                    for param_name, param in self.best_result.params.items():
                         params_data[-1][param_name] = param.value
-
-
-
-                    # ax_main.plot(wavelengths, result.best_fit, color='blue', linewidth=2,
-                    #              label=f'R²={r_squared:.4f}')
                 except Exception as e:
                     print("An error occurred during fitting:")
                     traceback.print_exc()
 
-        if save:
-            folder = f'./{filename}'
-            os.makedirs(folder, exist_ok=True)
-            params_df = pd.DataFrame(params_data)
-            params_df.to_excel("lmfit_parameters_current.xlsx", index=False)
-        pass
+            if save_plots:
+                folder = f'./{filename}'
+                os.makedirs(folder, exist_ok=True)
+                plt.savefig(f'{folder}/{key_coord[0]}_{key_coord[1]}_fitted.png', dpi=300)
+                plt.show()
+                plt.close()
+
+            if save_excel:
+                params_df = pd.DataFrame(params_data)
+                params_df.to_excel(f"lmfit_parameters_{exp_key}.xlsx", index=False)
+
 
     def get_data_coordinate(self):
         return self.data_coordinates
+
+    def __setup_plotting(self, figsize, wavelengths):
+        colors = sns.color_palette('inferno', len(self.list_of_exp))
+        n_images = len(self.list_of_exp)
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(6, 7, figure=fig, wspace=0.1, hspace=0.2)
+        ax_main = fig.add_subplot(gs[:, 0:4])
+        image_axes = dict()
+        n_cols = 3
+
+        for i, (key, value) in enumerate(self.data_dict.items(), start=0):
+            row = (i // n_cols) * 2
+            col = 4 + (i % n_cols)
+            ax_im = fig.add_subplot(gs[row:row + 2, col])
+            image_axes[key] = ax_im
+
+        ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
+        ax_main.set_ylabel('Intensity (a.u.)', fontsize=18, labelpad=15)
+
+        ax_main.tick_params(axis='both', which='major', labelsize=14, length=6, width=1.5)
+        ax_main.tick_params(axis='both', which='minor', length=4, width=1)
+
+        secax = ax_main.secondary_xaxis('top')
+        secax.set_xlabel('Energy (eV)', fontsize=18, labelpad=15)
+        secax.tick_params(axis='x', labelsize=14, length=6, width=1.5)
+
+        wavelength_ticks = np.linspace(min(wavelengths), max(wavelengths), num=6)
+        energy_ticks = np.linspace(wavelengths[0], wavelengths[-1], num=5)
+        secax.set_xticks(energy_ticks)
+        secax.set_xticklabels([f'{1239.84193 / wl:.2f}' for wl in energy_ticks])
+
+        ax_main.grid(True)
+        ax_main.grid(True, which='both', color='black', linestyle='--', linewidth=0.3)
+        for spine in ax_main.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(1.5)
+        ax_main.axvspan(950, 1000, color='green', alpha=0.15, label="950-1000 nm")
+        ax_main.axvspan(870, 940, color='blue', alpha=0.15, label="870-940 nm")
+
+        ax_main.legend()
+
+        return ax_main, image_axes, colors
+
+    def __setup_plotting_single_image(self, figsize, wavelengths):
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(6, 7, figure=fig, wspace=0.1, hspace=0.2)
+        ax_main = fig.add_subplot(gs[:, 0:4])
+        ax_im = fig.add_subplot(gs[:, 4:])
+
+        ax_main.set_xlabel('Wavelength (nm)', fontsize=18, labelpad=15)
+        ax_main.set_ylabel('Intensity (a.u.)', fontsize=18, labelpad=15)
+
+        ax_main.tick_params(axis='both', which='major', labelsize=14, length=6, width=1.5)
+        ax_main.tick_params(axis='both', which='minor', length=4, width=1)
+
+        secax = ax_main.secondary_xaxis('top')
+        secax.set_xlabel('Energy (eV)', fontsize=18, labelpad=15)
+        secax.tick_params(axis='x', labelsize=14, length=6, width=1.5)
+
+        wavelength_ticks = np.linspace(min(wavelengths), max(wavelengths), num=6)
+        energy_ticks = np.linspace(wavelengths[0], wavelengths[-1], num=5)
+        secax.set_xticks(energy_ticks)
+        secax.set_xticklabels([f'{1239.84193 / wl:.2f}' for wl in energy_ticks])
+
+        ax_main.grid(True)
+        ax_main.grid(True, which='both', color='black', linestyle='--', linewidth=0.3)
+        for spine in ax_main.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(1.5)
+        ax_main.axvspan(950, 1000, color='green', alpha=0.15, label="950-1000 nm")
+        ax_main.axvspan(870, 940, color='blue', alpha=0.15, label="870-940 nm")
+
+        ax_main.legend()
+
+        return ax_main, ax_im
+
+    def __setup_coordinations(self, key_coord, image_axes):
+        coord_x = []
+        coord_y = []
+        for i in self.data_coordinates.keys():
+            if i == 'ref':
+                coord_x.append(key_coord[1])
+                coord_y.append(key_coord[0])
+                CondAns.__plot_image_with_rect(image_axes[self.ref], self.data_dict[self.ref].get_live_scan(),
+                                               key_coord, self.ref)
+            else:
+                temp_coord = self.data_coordinates[i].get(key_coord)
+                if temp_coord is None:
+                    temp_coord = (0, 0)
+                coord_x.append(temp_coord[1])
+                coord_y.append(temp_coord[0])
+                CondAns.__plot_image_with_rect(image_axes[i], self.data_dict[i].get_live_scan(),
+                                               temp_coord, i)
+
+        return coord_x, coord_y
+
+    def __peak_fitting_auto(self, intensity, wavelengths, height, prominence, distance, max_peaks, fit_func):
+
+        self.best_r2 = None
+        self.best_result = None
+        self.best_model = None
+        self.params_fit = None
+        self.best_fit = None
+
+        peaks_indices, properties = find_peaks(intensity, height=height, prominence=prominence, distance=distance)
+        peak_positions = wavelengths[peaks_indices]
+        peak_heights = intensity[peaks_indices]
+
+        sorted_idx = np.argsort(peak_heights)[::-1]
+        sorted_idx = sorted_idx[:max_peaks + 1]
+        peak_positions = peak_positions[sorted_idx]
+        peak_heights = peak_heights[sorted_idx]
+
+        r2_list = []
+        params_list = []
+        models = []
+        results = []
+
+        model = ConstantModel(prefix='bkg_')
+        params = model.make_params(bkg_c=0)
+        for m, (pos, height) in enumerate(zip(peak_positions, peak_heights)):
+            prefix = f'g{m}_'
+            gauss = fit_func(prefix=prefix)
+            model += gauss
+            params.update(gauss.make_params())
+            params[f'{prefix}amplitude'].set(value=height, min=0)
+            params[f'{prefix}center'].set(value=pos)
+            params[f'{prefix}sigma'].set(value=1, min=0.1)
+
+            result = model.fit(intensity, params, x=wavelengths)
+
+            ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
+            ss_residual = np.sum(result.residual ** 2)
+            r_squared = 1 - (ss_residual / ss_total)
+            r2_list.append(r_squared)
+            params_list.append(result.params)
+            models.append(model)
+            results.append(result)
+
+            print(f"Using {m + 1} peak(s): R² = {r_squared:.4f}")
+
+            if len(peak_positions) == 1:
+                self.best_fit = m
+                self.params_fit = params_list[-1]
+                self.best_model = models[-1]
+                self.best_result = results[-1]
+                self.best_r2 = r2_list[-1]
+                break
+
+            if len(r2_list) == len(peak_positions):
+                if r2_list[-1] - r2_list[-2] < 0.01:
+                    self.best_fit = m
+                    self.params_fit = params_list[-2]
+                    self.best_model = models[-2]
+                    self.best_result = results[-2]
+                    self.best_r2 = r2_list[-2]
+                else:
+                    self.best_fit = m + 1
+                    self.params_fit = params_list[-1]
+                    self.best_model = models[-1]
+                    self.best_result = results[-1]
+                    self.best_r2 = r2_list[-1]
+
+            if len(r2_list) > 1 and r2_list[-1] - r2_list[-2] < 0.01 and r2_list[-2] > 0.95:
+                self.best_fit = m
+                self.params_fit = params_list[-2]
+                self.best_model = models[-2]
+                self.best_result = results[-2]
+                self.best_r2 = r2_list[-2]
+                break
 
     @staticmethod
     def visualize_pixel_similarity(image1, image2, coord1, coord2, patch1, patch2, ssim_value, window_size=11,
@@ -650,7 +551,6 @@ class CondAns:
                 result_dict[(i, j)] = tuple(correspondence_map[i][j])
 
         return result_dict
-
 
     @staticmethod
     def fit_lorentzian_spectrum(x, y, num_peaks=1, model_func=VoigtModel):
