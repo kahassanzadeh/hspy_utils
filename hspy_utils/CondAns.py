@@ -1,8 +1,10 @@
+from IPython.lib.display import FileLink
 from lmfit import Parameters
 
 from hspy_utils import HspyPrep
 import numpy as np
 import matplotlib.pyplot as plt
+from ipywidgets import IntProgress
 from skimage import io, color
 from skimage.metrics import structural_similarity as ssim
 import matplotlib.patches as patches
@@ -425,12 +427,33 @@ class CondAns:
                     if len(r2_list) == len(peak_positions):
                         break
 
-        if not flag:
+        if flag == False:
             self.best_fit = 1
             self.params_fit = params_list[0]
             self.best_model = models[0]
             self.best_result = results[0]
             self.best_r2 = r2_list[0]
+
+            # if r2_list[-1] - r2_list[-2] < 0.007:
+            #     self.best_fit = m
+            #     self.params_fit = params_list[-2]
+            #     self.best_model = models[-2]
+            #     self.best_result = results[-2]
+            #     self.best_r2 = r2_list[-2]
+            # else:
+            #     self.best_fit = m + 1
+            #     self.params_fit = params_list[-1]
+            #     self.best_model = models[-1]
+            #     self.best_result = results[-1]
+            #     self.best_r2 = r2_list[-1]
+
+            # if len(r2_list) > 1 and r2_list[-1] - r2_list[-2] < 0.007 and r2_list[-2] > 0.99:
+            #     self.best_fit = m
+            #     self.params_fit = params_list[-2]
+            #     self.best_model = models[-2]
+            #     self.best_result = results[-2]
+            #     self.best_r2 = r2_list[-2]
+            #     # break
 
     def interactive_peak_fit(self, exp_key, start_row=0, start_col=0):
         """
@@ -519,8 +542,10 @@ class CondAns:
                                          height=w_height.value, prominence=w_prominence.value,
                                          distance=w_distance.value, max_peaks=w_max_peaks.value,
                                          fit_func=w_fit_func.value)
+                # 2) create side‐by‐side plots
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
+                # — left: spectrum + fit
                 ax1.plot(wavelengths, intensity, label='data', markersize=3)
                 best = self.best_model.eval(x=wavelengths, params=self.params_fit)
                 ax1.plot(wavelengths, best, '-', label=f'best fit (R²={self.best_r2:.3f})')
@@ -537,11 +562,9 @@ class CondAns:
                     ax2.imshow(image_scan, cmap='gray')
                     ax2.axis('off')
                     ax2.set_title('Sample map')
-                    # compute cell size in pixels
                     img_h, img_w = image_scan.shape[:2]
                     cell_w = img_w / n_cols
                     cell_h = img_h / n_rows
-                    # rectangle lower‐left corner in pixels
                     x0 = (col * cell_w) - (cell_w / 2)
                     y0 = (row * cell_h) - (cell_h / 2)
                     from matplotlib.patches import Rectangle
@@ -558,8 +581,10 @@ class CondAns:
 
                 params = self.params_fit
 
+                # decide the order you want suffixes printed in
                 suffix_order = ['amplitude', 'center', 'sigma', 'fwhm']
 
+                # 1) collect all the prefixes (e.g. 'g0', 'g1', 'bkg')
                 prefixes = sorted({name.split('_', 1)[0] for name in params.keys()})
 
                 print(f"Fit parameters for {exp_key} @ (row={row},col={col}):")
@@ -671,6 +696,29 @@ class CondAns:
         row_entry.observe(update_display, names='value');
         col_entry.observe(update_display, names='value')
 
+        # # layout
+        # row_ctrl = HBox([row_entry, btn_prev_row, btn_next_row], layout=Layout(align_items='center', margin='0 10px'))
+        # col_ctrl = HBox([col_entry, btn_prev_col, btn_next_col], layout=Layout(align_items='center'))
+        # ctrl = VBox([
+        #     HBox([row_ctrl, col_ctrl]),
+        #     HBox([w_height, w_prominence], layout=Layout(margin='10px 0')),
+        #     HBox([w_distance, w_max_peaks, w_fit_func], layout=Layout(margin='10px 0')),
+        #     HBox([btn_fit, threshold_entry, include_low_chk, btn_fit_all], layout=Layout(margin='10px 0'))
+        # ])
+        # display(VBox([ctrl, out]))
+        # update_display()
+        # now build the UI
+        # controls = HBox([
+        #     exp_dropdown,
+        #     HBox([btn_prev_row, row_entry, btn_next_row]),
+        #     HBox([btn_prev_col, col_entry, btn_next_col])
+        # ])
+        # fit_controls = HBox([w_height, w_prominence, w_distance, w_max_peaks, w_fit_func, btn_fit])
+        # all_controls = HBox([threshold_entry, include_low_chk, btn_fit_all])
+        #
+        # display(VBox([controls, fit_controls, all_controls, out]))
+        #
+
         row1 = exp_dropdown
 
         # Row 2: row/col navigator
@@ -720,110 +768,378 @@ class CondAns:
         ], layout=Layout(spacing='15px')))
         update_display()
 
-    def manual_peak_panel(self, exp_key, start_row=0, start_col=0):
+    def interactive_peak_fit_manual(self, exp_key, start_row=0, start_col=0):
         """
-        Let the user enter peak params manually (center, sigma, height)
-        and overlay the chosen model (Gaussian or Lorentzian) on the data.
+        Interactive manual peak fitting with Prev/Next + direct-entry for row & col,
+        plus controls to add/remove individual peak guesses (amplitude, center, sigma, function),
+        collect them into a dict, and call __peak_fitting_manual.
         """
-        # 1) get data
+        from ipywidgets import HBox, VBox, Button, Dropdown, FloatText, BoundedIntText, Output, Layout
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        field_layout = Layout(width='180px')
+        label_style = {'description_width': '60px'}
+        btn_layout = Layout(width='150px')
+        hbox_gap = {'gap': '10px', 'margin': '5px 0'}
+
+        self.last_low_r2 = []
+        self.last_fit_results = []
+
+        # grab your data
         data = self.data_dict[exp_key].get_numpy_spectra()
         wavelengths = self.data_dict[exp_key].get_wavelengths()
-        max_row, max_col = data.shape[0] - 1, data.shape[1] - 1
+        image_scan = self.data_dict[exp_key].get_live_scan()
+        n_rows, n_cols = data.shape[:2]
+        max_row, max_col = n_rows - 1, n_cols - 1
 
-        # 2) row/col controls
-        row_entry = BoundedIntText(start_row, min=0, max=max_row, description='Row:')
-        col_entry = BoundedIntText(start_col, min=0, max=max_col, description='Col:')
+        row, col = start_row, start_col
+        peak_widgets = []  # list of tuples (amp_w, cen_w, sig_w, func_w)
 
-        btn_prev_row = Button(description='←', tooltip='Previous row', layout=Layout(width='30px'))
-        btn_next_row = Button(description='→', tooltip='Next row', layout=Layout(width='30px'))
-        btn_prev_col = Button(description='←', tooltip='Previous col', layout=Layout(width='30px'))
-        btn_next_col = Button(description='→', tooltip='Next col', layout=Layout(width='30px'))
+        # —— dataset selector ——
+        exp_dropdown = Dropdown(
+            options=list(self.data_dict.keys()),
+            value=exp_key,
+            description='Dataset:',
+            layout=Layout(margin='0 10px'),
+            style=label_style
+        )
 
-        def shift(widget, entry, delta, limit):
-            entry.value = np.clip(entry.value + delta, 0, limit)
+        # —— navigation entries ——
+        row_entry = BoundedIntText(
+            value=row, min=0, max=max_row,
+            description='Row:',
+            layout=field_layout,
+            style=label_style
+        )
+        col_entry = BoundedIntText(
+            value=col, min=0, max=max_col,
+            description='Col:',
+            layout=field_layout,
+            style=label_style
+        )
+        btn_prev_row = Button(description='←', layout=btn_layout)
+        btn_next_row = Button(description='→', layout=btn_layout)
+        btn_prev_col = Button(description='←', layout=btn_layout)
+        btn_next_col = Button(description='→', layout=btn_layout)
 
-        btn_prev_row.on_click(lambda _: shift(_, row_entry, -1, max_row))
-        btn_next_row.on_click(lambda _: shift(_, row_entry, +1, max_row))
-        btn_prev_col.on_click(lambda _: shift(_, col_entry, -1, max_col))
-        btn_next_col.on_click(lambda _: shift(_, col_entry, +1, max_col))
+        # —— peak controls ——
+        peaks_container = VBox(layout=Layout(border='1px solid lightgray', padding='5px'))
+        btn_add_peak = Button(description='Add Peak', layout=btn_layout)
+        btn_remove_peak = Button(description='Remove Peak', layout=btn_layout)
+        btn_fit_manual = Button(description='Fit Manual', button_style='primary', layout=btn_layout)
 
-        row_ctrl = HBox([row_entry, btn_prev_row, btn_next_row],
-                        layout=Layout(align_items='center', margin='0 20px 0 0'))
-        col_ctrl = HBox([col_entry, btn_prev_col, btn_next_col], layout=Layout(align_items='center'))
-
-        # 3) peak list container
-        peaks_container = VBox()
-        add_peak_btn = Button(description='Add Peak', button_style='success')
-
-        def add_peak(_):
-            # each row has three FloatText + remove button
-            c = FloatText(value=0.0, description='Center', layout=Layout(width='150px'))
-            s = FloatText(value=1.0, description='Sigma', layout=Layout(width='150px'))
-            h = FloatText(value=1.0, description='Height', layout=Layout(width='150px'))
-            rm = Button(description='✖', layout=Layout(width='30px'))
-            peak_row = HBox([c, s, h, rm], layout=Layout(align_items='center'))
-
-            def remove_peak(__):
-                # drop this row
-                peaks_container.children = tuple(w for w in peaks_container.children if w is not peak_row)
-
-            rm.on_click(remove_peak)
-            peaks_container.children += (peak_row,)
-
-        add_peak_btn.on_click(add_peak)
-
-        # 4) model selector + plot button + output
-        model_dd = Dropdown(options=['Gaussian', 'Lorentzian'], description='Model:')
-        plot_btn = Button(description='Plot Peaks', button_style='primary')
         out = Output(layout=Layout(border='1px solid gray'))
 
-        def compute_model(x, center, sigma, height, model):
-            if model == 'Gaussian':
-                return height * np.exp(-0.5 * ((x - center) / sigma) ** 2)
-            else:
-                # Lorentzian: height * (sigma**2 / ((x-center)**2 + sigma**2))
-                return height * (sigma ** 2 / ((x - center) ** 2 + sigma ** 2))
+        def make_peak_row():
+            amp = FloatText(
+                value=1.0,
+                description='Amp',
+                layout=field_layout,
+                style=label_style
+            )
+            cen = FloatText(
+                value=0.0,
+                description='Center',
+                layout=field_layout,
+                style=label_style
+            )
+            sig = FloatText(
+                value=1.0,
+                description='Sigma',
+                layout=field_layout,
+                style=label_style
+            )
+            func = Dropdown(
+                options=[('Gaussian', GaussianModel),
+                         ('Lorentzian', LorentzianModel),
+                         ('Voigt', VoigtModel)],
+                description='Func',
+                layout=field_layout,
+                style=label_style
+            )
+            peak_widgets.append((amp, cen, sig, func))
+            return HBox([amp, cen, sig, func], layout=Layout(**hbox_gap))
 
-        def on_plot(_):
-            r, c = row_entry.value, col_entry.value
-            y = data[r, c]
-            x = wavelengths
+        def on_add_peak(_):
+            widget_row = make_peak_row()
+            peaks_container.children += (widget_row,)
 
+        def on_remove_peak(_):
+            if peak_widgets:
+                peak_widgets.pop()
+                peaks_container.children = peaks_container.children[:-1]
+
+        # redraw & fit
+        def update_display():
+            nonlocal row, col, data, wavelengths
+            row, col = row_entry.value, col_entry.value
+            intensity = data[row, col]
             with out:
                 out.clear_output(wait=True)
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.plot(x, y, 'o', markersize=3, label='data')
+                # collect peaks
+                peak_list = []
+                for amp_w, cen_w, sig_w, func_w in peak_widgets:
+                    peak_list.append({
+                        'amplitude': amp_w.value,
+                        'center': cen_w.value,
+                        'sigma': sig_w.value,
+                        'func': func_w.value
+                    })
+                # print(f"Manual peak params for {exp_key} @ (row={row},col={col}):")
+                # for i, p in enumerate(peak_list):
+                #     print(f"  Peak {i}: {p}")
 
-                total = np.zeros_like(x)
-                # loop through each peak widget row
-                for row in peaks_container.children:
-                    center = row.children[0].value
-                    sigma = row.children[1].value
-                    height = row.children[2].value
-                    curve = compute_model(x, center, sigma, height, model_dd.value)
-                    total += curve
-                    ax.plot(x, curve, '--', label=f'peak @ {center:.2f}')
+                self.__peak_fitting_manual(
+                    intensity=intensity,
+                    wavelengths=wavelengths,
+                    peak_params=peak_list
+                )
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                # print(self.params_fit)
+                # print(self.best_r2)
+                ax1.plot(wavelengths, intensity, label='data', markersize=3)
+                best = self.best_model.eval(x=wavelengths, params=self.params_fit)
+                ax1.plot(wavelengths, best, '-', label=f'best fit (R²={self.best_r2:.3f})')
+                names = []
+                for name, comp in self.best_model.eval_components(x=wavelengths, params=self.params_fit).items():
+                    names.append(name)
+                    if name != 'bkg_':
+                        ax1.plot(wavelengths, comp, '--', label=name)
 
-                ax.plot(x, total, '-', lw=2, label='sum')
-                ax.set_xlabel('Wavelength')
-                ax.set_ylabel('Intensity')
-                ax.set_title(f'{exp_key} @ (row={r}, col={c})')
-                ax.legend()
+                ax1.set(xlabel='Wavelength', ylabel='Intensity',
+                        title=f'{exp_key} @ (row={row},col={col})')
+                ax1.legend()
+                if image_scan is not None:
+                    ax2.imshow(image_scan, cmap='gray')
+                    ax2.axis('off')
+                    ax2.set_title('Sample map')
+                    # compute cell size in pixels
+                    img_h, img_w = image_scan.shape[:2]
+                    cell_w = img_w / n_cols
+                    cell_h = img_h / n_rows
+                    # rectangle lower‐left corner in pixels
+                    x0 = (col * cell_w) - (cell_w / 2)
+                    y0 = (row * cell_h) - (cell_h / 2)
+                    from matplotlib.patches import Rectangle
+                    rect = Rectangle((x0, y0), cell_w, cell_h,
+                                     linewidth=2, edgecolor='red', facecolor='none')
+                    ax2.add_patch(rect)
+                else:
+                    ax2.text(0.5, 0.5, 'No map image\nprovided',
+                             ha='center', va='center', fontsize=12)
+                    ax2.axis('off')
+
+                plt.tight_layout()
                 plt.show()
 
-        plot_btn.on_click(on_plot)
+                params = self.params_fit
 
-        # 5) assemble everything
-        controls = VBox([
-            HBox([row_ctrl, col_ctrl]),
-            add_peak_btn,
+                # decide the order you want suffixes printed in
+                suffix_order = ['amplitude', 'center', 'sigma', 'fwhm']
+
+                # 1) collect all the prefixes (e.g. 'g0', 'g1', 'bkg')
+                prefixes = sorted({name.split('_', 1)[0] for name in params.keys()})
+
+                print(f"Fit parameters for {exp_key} @ (row={row},col={col}):")
+                print(f"  overall R² = {self.best_r2:.4f}")
+                print("  detailed parameters:")
+
+                for pfx in prefixes:
+                    print(f"  {pfx}_:")
+                    for suf in suffix_order:
+                        full = f"{pfx}_{suf}"
+                        if full in params:
+                            par = params[full]
+                            print(f"    {suf:<9} = {par.value:10.3f}  ± {par.stderr:.3f}" if par.stderr else
+                                  f"    {suf:<9} = {par.value:10.3f}")
+                    extras = sorted(
+                        name.split('_', 1)[1]
+                        for name in params.keys()
+                        if name.startswith(pfx + '_') and name.split('_', 1)[1] not in suffix_order
+                    )
+                    for suf in extras:
+                        par = params[f"{pfx}_{suf}"]
+                        print(f"    {suf:<9} = {par.value:10.3f}")
+
+        # wire buttons
+        btn_add_peak.on_click(on_add_peak)
+        btn_remove_peak.on_click(on_remove_peak)
+        btn_fit_manual.on_click(lambda _: update_display())
+
+        threshold_entry = BoundedFloatText(value=0.9, min=0.0, max=1.0, step=0.01, description='R² thresh:')
+        include_low_chk = Checkbox(value=True, description='Include low R² in Excel')
+        btn_fit_all = Button(description='Fit All', button_style='warning')
+
+        def fit_all_callback(_):
+            self.last_low_r2.clear()
+            self.last_fit_results.clear()
+            thresh = threshold_entry.value
+            total = data.shape[0] * data.shape[1]
+            progress = IntProgress(min=0, max=total, description='Fitting:')
+            count = 0
+            low_list = []
+            with out:
+                out.clear_output()
+                display(progress)
+                peak_list = []
+                for amp_w, cen_w, sig_w, func_w in peak_widgets:
+                    peak_list.append({
+                        'amplitude': amp_w.value,
+                        'center': cen_w.value,
+                        'sigma': sig_w.value,
+                        'func': func_w.value
+                    })
+                for r in range(data.shape[0]):
+                    for c in range(data.shape[1]):
+                        try:
+                            self.__peak_fitting_manual(
+                                intensity=data[r, c],
+                                wavelengths=wavelengths,
+                                peak_params=peak_list
+                            )
+                            params = self.params_fit.valuesdict()
+                            rec = {'row': r, 'col': c, 'r2': self.best_r2,
+                                   'func_list': [peak['func'] for peak in peak_list]}
+                            rec.update(params)
+                            self.last_fit_results.append(rec)
+                            if self.best_r2 < thresh: low_list.append((r, c, self.best_r2))
+                        except Exception as e:
+                            print(f"Error fitting (row={r}, col={c}): {e}")
+                        count += 1
+                        progress.value = count
+
+                self.last_low_r2 = low_list
+                df = pd.DataFrame(self.last_fit_results)
+                if not include_low_chk.value:
+                    df = df[df['r2'] >= thresh]
+                path = f'fitting_results_{exp_key}.xlsx'
+                df.to_excel(path, index=False)
+                if low_list:
+                    print(f"Spectra with R² below {thresh}:")
+                    for r, c, r2 in low_list: print(f"  row={r},col={c},R²={r2:.3f}")
+                else:
+                    print(f"All spectra have R² ≥ {thresh}.")
+                print(f"\nExcel file saved to '{path}'.")
+                display(FileLink(path))
+
+        btn_fit_all.on_click(fit_all_callback)
+
+        # navigation logic
+        def shift_row(d):
+            row_entry.value = np.clip(row_entry.value + d, 0, max_row)
+
+        def shift_col(d):
+            col_entry.value = np.clip(col_entry.value + d, 0, max_col)
+
+        btn_prev_row.on_click(lambda _: shift_row(-1))
+        btn_next_row.on_click(lambda _: shift_row(1))
+        btn_prev_col.on_click(lambda _: shift_col(-1))
+        btn_next_col.on_click(lambda _: shift_col(1))
+
+        row_entry.observe(lambda _: update_display(), names='value')
+        col_entry.observe(lambda _: update_display(), names='value')
+
+        def on_key_change(change):
+            if change['name'] == 'value' and change['new'] != change['old']:
+                # reload all of your spectra
+                nonlocal data, wavelengths, image_scan, n_rows, n_cols, max_row, max_col
+                data = self.data_dict[change['new']].get_numpy_spectra()
+                wavelengths = self.data_dict[change['new']].get_wavelengths()
+                image_scan = self.data_dict[change['new']].get_live_scan()
+                n_rows, n_cols = data.shape[:2]
+                max_row, max_col = n_rows - 1, n_cols - 1
+                row_entry.max, col_entry.max = max_row, max_col
+                row_entry.value, col_entry.value = 0, 0
+                update_display()
+
+        exp_dropdown.observe(on_key_change, names='value')
+
+        # assemble the top-level layout
+        nav_row = HBox([btn_prev_row, row_entry, btn_next_row], layout=Layout(gap='5px'))
+        nav_col = HBox([btn_prev_col, col_entry, btn_next_col], layout=Layout(gap='5px'))
+        peak_ctrl = HBox([btn_add_peak, btn_remove_peak, btn_fit_manual, threshold_entry, include_low_chk, btn_fit_all],
+                         layout=Layout(margin='10px 0', gap='10px'))
+
+        from IPython.display import display
+        display(VBox([
+            exp_dropdown,
+            nav_row,
+            nav_col,
+            peak_ctrl,
             peaks_container,
-            HBox([model_dd, plot_btn], layout=Layout(margin='10px 0')),
-        ])
-        display(VBox([controls, out]))
+            out
+        ], layout=Layout(spacing='10px')))
 
-        # seed with one peak row
-        add_peak(None)
+        # trigger your initial plot
+        # update_display()
+
+    def __peak_fitting_manual(self, intensity, wavelengths, peak_params):
+        peak_params.sort(key=lambda p: p['amplitude'], reverse=True)
+        composite_model = ConstantModel(prefix='bkg_')
+        params = composite_model.make_params(bkg_c=0)
+
+        self.best_r2 = None
+        self.best_result = None
+        self.best_model = None
+        self.params_fit = None
+        self.best_fit = None
+
+        r2_list = []
+        params_list = []
+        models = []
+        results = []
+
+        for i in range(len(peak_params)):
+            # temp_peak_list = peak_params[:i + 1]
+            model = peak_params[i].get('func')(prefix=f'p{i}_')
+
+            if composite_model is None:
+                composite_model = model
+            else:
+                composite_model += model
+
+            model_params = model.make_params()
+
+            if params is None:
+                params = model_params
+            else:
+                params.update(model_params)
+
+            params[f'p{i}_amplitude'].set(value=peak_params[i].get('amplitude'), min=0)
+            params[f'p{i}_center'].set(value=peak_params[i].get('center'), min=wavelengths.min(), max=wavelengths.max())
+            params[f'p{i}_sigma'].set(value=peak_params[i].get('sigma'), min=0)
+
+            result = composite_model.fit(intensity, params, x=wavelengths)
+
+            ss_total = np.sum((intensity - np.mean(intensity)) ** 2)
+            ss_residual = np.sum(result.residual ** 2)
+            r_squared = 1 - (ss_residual / ss_total)
+            r2_list.append(r_squared)
+            params_list.append(result.params)
+            models.append(composite_model)
+            results.append(result)
+
+            print(f"Using {i + 1} peak(s): R² = {r_squared:.4f}")
+
+            # if len(peak_params) == 1:
+            self.best_fit = i
+            self.params_fit = params_list[-1]
+            self.best_model = models[-1]
+            self.best_result = results[-1]
+            self.best_r2 = r2_list[-1]
+
+        r2_temp = sorted(r2_list, reverse=True)
+        for i in range(len(r2_temp) - 1):
+            if r2_temp[i] - r2_temp[i + 1] > 0.005:
+                index = r2_list.index(r2_temp[i])
+                self.best_fit = index
+                self.params_fit = params_list[index]
+                self.best_model = models[index]
+                self.best_result = results[index]
+                self.best_r2 = r2_list[index]
+                if len(r2_list) == len(peak_params):
+                    break
 
     def interactive_peak_refine(self, exp_key, start_row=0, start_col=0):
         """
